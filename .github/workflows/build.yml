@@ -1,0 +1,351 @@
+name: Build QuickExpense APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Generate Native S25 Ultra Expense App Source
+        run: |
+          mkdir -p src/main/java/com/s25/quickexpense
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "QuickExpense"
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.5.2"
+              id("org.jetbrains.kotlin.android") version "1.9.24"
+          }
+
+          android {
+              namespace = "com.s25.quickexpense"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.s25.quickexpense"
+                  minSdk = 27
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat << 'EOF' > src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="Quick Expense"
+                  android:theme="@android:style/Theme.DeviceDefault.Dialog.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:showWhenLocked="true"
+                      android:turnScreenOn="true"
+                      android:excludeFromRecents="true"
+                      android:windowSoftInputMode="stateAlwaysVisible|adjustPan">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > src/main/java/com/s25/quickexpense/MainActivity.kt
+          package com.s25.quickexpense
+
+          import android.app.Activity
+          import android.app.KeyguardManager
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.os.Bundle
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.View
+          import android.view.WindowManager
+          import android.view.inputmethod.InputMethodManager
+          import android.widget.*
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          class MainActivity : Activity() {
+
+              private lateinit var container: LinearLayout
+              private var enteredAmount: Double = 0.0
+              private var enteredNote: String = ""
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  // Wake screen and display over S25 Ultra Lock Screen
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                      setShowWhenLocked(true)
+                      setTurnScreenOn(true)
+                  }
+                  window.addFlags(
+                      WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                      WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                      WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                  )
+
+                  container = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(64, 56, 64, 56)
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor("#1E1E24"))
+                          cornerRadius = 48f
+                      }
+                  }
+
+                  setContentView(container)
+                  showAmountStep()
+              }
+
+              private fun showAmountStep() {
+                  container.removeAllViews()
+
+                  val title = TextView(this).apply {
+                      text = "💸 Add Expense"
+                      textSize = 22f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                  }
+
+                  val totalText = TextView(this).apply {
+                      text = "Total Spent: ₹${String.format("%.2f", getTotalSpent())}"
+                      textSize = 14f
+                      setTextColor(Color.parseColor("#A0A0B0"))
+                      gravity = Gravity.CENTER
+                      setPadding(0, 8, 0, 32)
+                  }
+
+                  val amountInput = EditText(this).apply {
+                      hint = "Enter Amount (₹)"
+                      setHintTextColor(Color.parseColor("#707080"))
+                      setTextColor(Color.WHITE)
+                      textSize = 24f
+                      gravity = Gravity.CENTER
+                      inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                  }
+
+                  val noteInput = EditText(this).apply {
+                      hint = "Optional Note (e.g. Snacks, Ticket)"
+                      setHintTextColor(Color.parseColor("#707080"))
+                      setTextColor(Color.WHITE)
+                      textSize = 15f
+                      gravity = Gravity.CENTER
+                  }
+
+                  val confirmBtn = makeButton("Confirm Amount ➡️", "#4F46E5") {
+                      val raw = amountInput.text.toString().trim()
+                      val value = raw.toDoubleOrNull()
+                      if (value == null || value <= 0.0) {
+                          Toast.makeText(this, "Enter a valid amount!", Toast.LENGTH_SHORT).show()
+                      } else {
+                          enteredAmount = value
+                          enteredNote = noteInput.text.toString().trim()
+                          showCategoryStep()
+                      }
+                  }
+
+                  val historyBtn = makeButton("📋 View History & Clear", "#2D2D3A") {
+                      showHistoryStep()
+                  }
+
+                  container.addView(title)
+                  container.addView(totalText)
+                  container.addView(amountInput)
+                  container.addView(noteInput)
+                  container.addView(confirmBtn)
+                  container.addView(historyBtn)
+
+                  amountInput.requestFocus()
+                  amountInput.postDelayed({
+                      val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                      imm.showSoftInput(amountInput, InputMethodManager.SHOW_IMPLICIT)
+                  }, 150)
+              }
+
+              private fun showCategoryStep() {
+                  container.removeAllViews()
+
+                  val subtitle = TextView(this).apply {
+                      text = "Select Category for ₹${String.format("%.2f", enteredAmount)}"
+                      textSize = 19f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, 32)
+                  }
+                  container.addView(subtitle)
+
+                  val categories = listOf(
+                      "🍔 Food" to "#EF4444",
+                      "🎬 Movie" to "#8B5CF6",
+                      "📚 Study" to "#3B82F6",
+                      "⛽ Gas" to "#F59E0B",
+                      "🛒 Other" to "#10B981"
+                  )
+
+                  for ((catName, colorHex) in categories) {
+                      val btn = makeButton(catName, colorHex) {
+                          saveExpense(enteredAmount, catName, enteredNote)
+                          Toast.makeText(
+                              this,
+                              "Saved ₹$enteredAmount to $catName! Total: ₹${String.format("%.2f", getTotalSpent())}",
+                              Toast.LENGTH_LONG
+                          ).show()
+                          finish()
+                      }
+                      container.addView(btn)
+                  }
+              }
+
+              private fun showHistoryStep() {
+                  container.removeAllViews()
+
+                  val title = TextView(this).apply {
+                      text = "📊 Expense Summary"
+                      textSize = 20f
+                      setTypeface(null, Typeface.BOLD)
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      setPadding(0, 0, 0, 20)
+                  }
+                  container.addView(title)
+
+                  val prefs = getSharedPreferences("expenses_db", Context.MODE_PRIVATE)
+                  val arr = JSONArray(prefs.getString("records", "[]"))
+
+                  val scroll = ScrollView(this)
+                  val listText = TextView(this).apply {
+                      setTextColor(Color.parseColor("#E0E0E0"))
+                      textSize = 14f
+                      val sb = StringBuilder()
+                      if (arr.length() == 0) {
+                          sb.append("No expenses saved yet.")
+                      } else {
+                          for (i in arr.length() - 1 downTo 0) {
+                              val obj = arr.getJSONObject(i)
+                              val notePart = if (obj.optString("note").isNotEmpty()) " (${obj.optString("note")})" else ""
+                              sb.append("• ${obj.getString("time")} — ${obj.getString("category")}: ₹${obj.getDouble("amount")}$notePart\n\n")
+                          }
+                      }
+                      text = sb.toString()
+                  }
+                  scroll.addView(listText)
+                  container.addView(scroll, LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT, 550
+                  ))
+
+                  val backBtn = makeButton("⬅️ Back", "#4F46E5") { showAmountStep() }
+                  val clearBtn = makeButton("🗑️ Reset All Expenses", "#991B1B") {
+                      prefs.edit().clear().apply()
+                      Toast.makeText(this, "All expenses cleared!", Toast.LENGTH_SHORT).show()
+                      showAmountStep()
+                  }
+
+                  container.addView(backBtn)
+                  container.addView(clearBtn)
+              }
+
+              private fun makeButton(label: String, hexColor: String, onClick: () -> Unit): Button {
+                  return Button(this).apply {
+                      text = label
+                      setTextColor(Color.WHITE)
+                      textSize = 16f
+                      isAllCaps = false
+                      background = GradientDrawable().apply {
+                          setColor(Color.parseColor(hexColor))
+                          cornerRadius = 28f
+                      }
+                      val params = LinearLayout.LayoutParams(
+                          LinearLayout.LayoutParams.MATCH_PARENT,
+                          LinearLayout.LayoutParams.WRAP_CONTENT
+                      ).apply {
+                          setMargins(0, 14, 0, 0)
+                      }
+                      layoutParams = params
+                      setOnClickListener { onClick() }
+                  }
+              }
+
+              private fun saveExpense(amount: Double, category: String, note: String) {
+                  val prefs = getSharedPreferences("expenses_db", Context.MODE_PRIVATE)
+                  val arr = JSONArray(prefs.getString("records", "[]"))
+                  val stamp = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date())
+                  val item = JSONObject().apply {
+                      put("amount", amount)
+                      put("category", category)
+                      put("note", note)
+                      put("time", stamp)
+                  }
+                  arr.put(item)
+                  prefs.edit().putString("records", arr.toString()).apply()
+              }
+
+              private fun getTotalSpent(): Double {
+                  val prefs = getSharedPreferences("expenses_db", Context.MODE_PRIVATE)
+                  val arr = JSONArray(prefs.getString("records", "[]"))
+                  var sum = 0.0
+                  for (i in 0 until arr.length()) {
+                      sum += arr.getJSONObject(i).optDouble("amount", 0.0)
+                  }
+                  return sum
+              }
+          }
+          EOF
+
+          gradle assembleDebug
+
+      - name: Upload Compiled APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: QuickExpense-S25Ultra-APK
+          path: build/outputs/apk/debug/QuickExpense-debug.apk
